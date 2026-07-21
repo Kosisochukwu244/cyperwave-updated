@@ -1,0 +1,519 @@
+"""
+MQTT client wrapper for real-time communication with Cyberwave platform.
+
+This module provides a compatibility layer that adapts the CyberwaveMQTTClient
+from the mqtt module to work with the CyberwaveConfig object used by the main client.
+"""
+
+import logging
+from typing import Callable, Optional, Dict, Any
+
+from .config import CyberwaveConfig, DEFAULT_MQTT_PORT
+from .mqtt import CyberwaveMQTTClient as BaseMQTTClient
+from .mqtt import _UNSET
+
+logger = logging.getLogger(__name__)
+
+
+class CyberwaveMQTTClient:
+    """
+    Wrapper for MQTT communication with the Cyberwave platform.
+
+    This class adapts the BaseMQTTClient to work with CyberwaveConfig objects,
+    providing a compatibility layer for the main Cyberwave client.
+
+    Provides high-level methods for publishing and subscribing to twin updates,
+    joint states, and other real-time events.
+
+    TODO: We should just use the BaseMQTTClient and call that CyberwaveMQTTClient
+    """
+
+    def __init__(self, config: CyberwaveConfig, mqtt_password: Optional[str] = None):
+        """
+        Initialize MQTT client from a CyberwaveConfig object.
+
+        Args:
+            config: Cyberwave configuration object containing MQTT settings
+            mqtt_password: Optional explicit MQTT password override
+        """
+        self.config = config
+
+        # Determine broker, port, username, and API key from config.
+        mqtt_broker = config.mqtt_host or "mqtt.cyberwave.com"
+        mqtt_port = config.mqtt_port or DEFAULT_MQTT_PORT
+        mqtt_username = config.mqtt_username or "mqttcyb"
+        api_key = config.api_key
+        # Explicit MQTT password (ctor arg or CYBERWAVE_MQTT_PASSWORD) wins over API key
+        # so CI can use legacy broker credentials while REST keeps the API token.
+        effective_mqtt_password = mqtt_password or config.mqtt_password or api_key
+        if not effective_mqtt_password:
+            raise ValueError(
+                "API key or mqtt_password is required. "
+                "Set CYBERWAVE_API_KEY or pass mqtt_password explicitly"
+            )
+
+        # Determine topic prefix from config (which handles env vars)
+        topic_prefix = config.topic_prefix or ""
+        client_id_prefix = "sdk_sim_" if config.runtime_mode == "simulation" else "sdk_"
+
+        self._topic_prefix = topic_prefix
+
+        # Initialize the base MQTT client
+        self._client = BaseMQTTClient(
+            mqtt_broker=mqtt_broker,
+            mqtt_port=mqtt_port,
+            mqtt_username=mqtt_username,
+            api_key=api_key,
+            mqtt_password=effective_mqtt_password,
+            use_tls=config.mqtt_use_tls,
+            tls_ca_cert=config.mqtt_tls_ca_cert,
+            topic_prefix=topic_prefix,
+            client_id_prefix=client_id_prefix,
+            source_type=config.source_type,
+            protocol=config.mqtt_protocol,
+        )
+
+    @property
+    def connected(self) -> bool:
+        """Check if the client is connected to the MQTT broker."""
+        return self._client.connected
+
+    @property
+    def topic_prefix(self) -> str:
+        """Get the topic prefix used by this MQTT client."""
+        return self._topic_prefix
+
+    @property
+    def client_id(self) -> str:
+        """Get the MQTT client ID."""
+        return self._client.client_id
+
+    def connect(self):
+        """Connect to the MQTT broker."""
+        if not self.connected:
+            self._client.connect()
+
+    def disconnect(self):
+        """Disconnect from the MQTT broker."""
+        self._client.disconnect()
+
+    # Delegate all methods to the base client
+    def subscribe_twin(self, twin_uuid: str, on_update: Optional[Callable] = None):
+        """
+        Subscribe to twin updates via MQTT.
+
+        Args:
+            twin_uuid: UUID of the twin to monitor
+            on_update: Callback function for updates
+        """
+        return self._client.subscribe_twin(twin_uuid, on_update)
+
+    def subscribe_twin_position(
+        self, twin_uuid: str, callback: Callable[[Dict[str, Any]], None]
+    ):
+        """
+        Subscribe to twin position updates.
+
+        Args:
+            twin_uuid: UUID of the twin to monitor
+            callback: Function to call when position updates are received
+        """
+        # Include topic prefix to match backend pattern
+        prefix = self.topic_prefix
+        topic = f"{prefix}cyberwave/twin/{twin_uuid}/position"
+        return self._client.subscribe(topic, callback)
+
+    def subscribe_twin_rotation(
+        self, twin_uuid: str, callback: Callable[[Dict[str, Any]], None]
+    ):
+        """
+        Subscribe to twin rotation updates.
+
+        Args:
+            twin_uuid: UUID of the twin to monitor
+            callback: Function to call when rotation updates are received
+        """
+        # Include topic prefix to match backend pattern
+        prefix = self.topic_prefix
+        topic = f"{prefix}cyberwave/twin/{twin_uuid}/rotation"
+        return self._client.subscribe(topic, callback)
+
+    def subscribe_joint_states(
+        self, twin_uuid: str, callback: Callable[[Dict[str, Any]], None]
+    ):
+        """
+        Subscribe to joint state updates.
+
+        Args:
+            twin_uuid: UUID of the twin to monitor
+            callback: Function to call when joint state updates are received
+        """
+        # Include topic prefix to match backend pattern
+        prefix = self.topic_prefix
+        topic = f"{prefix}cyberwave/joint/{twin_uuid}/+"
+        return self._client.subscribe(topic, callback)
+
+    def update_twin_position(self, twin_uuid: str, position: Dict[str, float]):
+        """
+        Update twin position via MQTT.
+
+        Args:
+            twin_uuid: UUID of the twin
+            position: Dictionary with x, y, z coordinates
+        """
+        return self._client.update_twin_position(twin_uuid, position)
+
+    def publish_twin_position(self, twin_uuid: str, x: float, y: float, z: float):
+        """
+        Publish twin position update (backward compatibility method).
+
+        Args:
+            twin_uuid: UUID of the twin
+            x, y, z: Position coordinates
+        """
+        return self._client.update_twin_position(twin_uuid, {"x": x, "y": y, "z": z})
+
+    def update_twin_rotation(self, twin_uuid: str, rotation: Dict[str, float]):
+        """
+        Update twin rotation via MQTT.
+
+        Args:
+            twin_uuid: UUID of the twin
+            rotation: Dictionary with rotation values (quaternion or euler)
+        """
+        return self._client.update_twin_rotation(twin_uuid, rotation)
+
+    def update_twin_scale(self, twin_uuid: str, scale: Dict[str, float]):
+        """
+        Update twin scale via MQTT.
+
+        Args:
+            twin_uuid: UUID of the twin
+            scale: Dictionary with scale values
+        """
+        return self._client.update_twin_scale(twin_uuid, scale)
+
+    def publish_initial_observation(
+        self, twin_uuid: str, observations: Dict[str, Any], fps: float = 30.0
+    ):
+        """
+        Send initial observations to the leader twin.
+
+        Args:
+            twin_uuid: UUID of the twin
+            observations: Dictionary of observations
+        """
+        return self._client.publish_initial_observation(twin_uuid, observations, fps)
+
+    def publish_telemetry_start(
+        self, twin_uuid: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Publish telemetry start message via MQTT.
+
+        Registers the twin so no duplicate telemetry_start is sent when joint
+        updates or other twin updates trigger _handle_twin_update_with_telemetry.
+
+        Args:
+            twin_uuid: UUID of the twin
+            metadata: Optional dict (e.g. {"fps": 100, "observations": {"edge_leader": {...}, "edge_follower": {...}}})
+        """
+        return self._client.publish_telemetry_start(twin_uuid, metadata)
+
+    def publish_telemetry_start_message(
+        self, twin_uuid: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Publish telemetry_start message unconditionally (no already_started check).
+
+        Registers the twin and publishes connect + telemetry_start. Caller is
+        responsible for ensuring this is only called once.
+
+        Args:
+            twin_uuid: UUID of the twin
+            metadata: Optional dict (e.g. {"fps": 100, "observations": {...}})
+        """
+        return self._client.publish_telemetry_start_message(twin_uuid, metadata)
+
+    def publish_telemetry_end(
+        self,
+        twin_uuid: str,
+        sensor: Optional[str] = None,
+        stream_source: Optional[str] = None,
+        stream_instance_id: Optional[str] = None,
+    ) -> None:
+        """
+        Publish telemetry_end and clear SDK telemetry-start tracking for this twin.
+
+        Match edge teleop cleanup so recordings/sessions end cleanly.
+        """
+        return self._client.publish_telemetry_end(
+            twin_uuid,
+            sensor=sensor,
+            stream_source=stream_source,
+            stream_instance_id=stream_instance_id,
+        )
+
+    def update_joint_state(
+        self,
+        twin_uuid: str,
+        joint_name: str,
+        position: Optional[float] = None,
+        velocity: Optional[float] = None,
+        effort: Optional[float] = None,
+        timestamp: Optional[float] = None,
+        source_type: Optional[str] = None,
+    ):
+        """
+        Update joint state via MQTT.
+
+        Args:
+            twin_uuid: UUID of the twin
+            joint_name: Name of the joint
+            position: Joint position (radians for revolute, meters for prismatic)
+            velocity: Joint velocity
+            effort: Joint effort/torque
+            timestamp: Unix timestamp (defaults to current time)
+            source_type: Source type for the message. Must be one of:
+                SOURCE_TYPE_EDGE, SOURCE_TYPE_TELE, SOURCE_TYPE_EDIT, SOURCE_TYPE_SIM.
+                Defaults to SOURCE_TYPE_EDGE (SDKs run on edge devices by default).
+                Users can override this to use any source type they need.
+        """
+        return self._client.update_joint_state(
+            twin_uuid,
+            joint_name,
+            position,
+            velocity,
+            effort,
+            timestamp,
+            source_type=source_type,
+        )
+
+    def update_joints_state(
+        self,
+        twin_uuid: str,
+        joint_positions: Dict[str, float],
+        source_type: Optional[str] = None,
+        velocities: Optional[Dict[str, float]] = None,
+        efforts: Optional[Dict[str, float]] = None,
+        timestamp: Optional[float] = None,
+        source_subtype: Optional[str] = None,
+        workload_uuid: Optional[str] = None,
+        session_id: Optional[str] = None,
+        camera_frame_counters: Optional[Dict[str, Dict[str, Any]]] = None,
+        as_targets: bool = False,
+    ):
+        """
+        Update multiple joints at once via MQTT.
+
+        Supports two formats based on provided parameters:
+
+        1. **Flat format** (joint_positions only):
+           Simple and lightweight, sends positions as top-level keys.
+
+        2. **Aggregated format** (with velocities, efforts, timestamp, or metadata):
+           Sends structured payload with nested objects and full telemetry metadata.
+
+        Args:
+            twin_uuid: UUID of the twin
+            joint_positions: Dict of joint names to positions (e.g., {"_1": 0.5, "_2": 0.3})
+            source_type: SOURCE_TYPE_EDGE (default), SOURCE_TYPE_TELE, SOURCE_TYPE_EDIT, etc.
+            velocities: Optional dict of joint names to velocities (triggers aggregated format)
+            efforts: Optional dict of joint names to efforts (triggers aggregated format)
+            timestamp: Optional timestamp in seconds (triggers aggregated format)
+            source_subtype: Optional subtype (e.g., "openvla" for inference workloads)
+            workload_uuid: Optional UUID of the workload generating this update
+            session_id: Optional session ID for grouping related updates
+            camera_frame_counters: Optional dict mapping track_id to frame info used
+                for robot-camera synchronization.
+            as_targets: When True, publish as a *command* using ``target_*`` field
+                names (target_positions/target_velocities/target_efforts) instead
+                of the measured names. Used by controllers so the plant and viewers
+                never confuse a commanded setpoint with measured robot state.
+        """
+        return self._client.update_joints_state(
+            twin_uuid,
+            joint_positions,
+            source_type,
+            velocities,
+            efforts,
+            timestamp,
+            source_subtype,
+            workload_uuid,
+            session_id,
+            camera_frame_counters,
+            as_targets,
+        )
+
+    def update_aggregated_joints_state(
+        self,
+        twin_uuid: str,
+        joint_positions: Dict[str, float],
+        source_type: Optional[str] = None,
+        velocities: Optional[Dict[str, float]] = None,
+        efforts: Optional[Dict[str, float]] = None,
+        timestamp: Optional[float] = None,
+        source_subtype: Optional[str] = None,
+        workload_uuid: Optional[str] = None,
+        session_id: Optional[str] = None,
+        camera_frame_counters: Optional[Dict[str, Dict[str, Any]]] = None,
+    ):
+        """
+        Alias for update_joints_state with aggregated format.
+
+        Deprecated: Use update_joints_state() instead.
+        """
+        return self._client.update_aggregated_joints_state(
+            twin_uuid,
+            joint_positions,
+            source_type,
+            velocities,
+            efforts,
+            timestamp,
+            source_subtype,
+            workload_uuid,
+            session_id,
+            camera_frame_counters,
+        )
+
+    def subscribe_environment(
+        self, environment_uuid: str, on_update: Optional[Callable] = None
+    ):
+        """
+        Subscribe to environment updates via MQTT.
+
+        Args:
+            environment_uuid: UUID of the environment
+            on_update: Callback function for updates
+        """
+        return self._client.subscribe_environment(environment_uuid, on_update)
+
+    def publish_environment_update(
+        self, environment_uuid: str, update_type: str, data: Dict[str, Any]
+    ):
+        """
+        Publish environment update via MQTT.
+
+        Args:
+            environment_uuid: UUID of the environment
+            update_type: Type of update
+            data: Update data
+        """
+        return self._client.publish_environment_update(
+            environment_uuid, update_type, data
+        )
+
+    def subscribe_video_stream(
+        self, twin_uuid: str, on_frame: Optional[Callable] = None
+    ):
+        """Subscribe to video stream via MQTT."""
+        return self._client.subscribe_video_stream(twin_uuid, on_frame)
+
+    def subscribe_depth_stream(
+        self, twin_uuid: str, on_frame: Optional[Callable] = None
+    ):
+        """Subscribe to depth stream via MQTT."""
+        return self._client.subscribe_depth_stream(twin_uuid, on_frame)
+
+    def subscribe_pointcloud_stream(
+        self, twin_uuid: str, on_pointcloud: Optional[Callable] = None
+    ):
+        """Subscribe to point cloud stream via MQTT."""
+        return self._client.subscribe_pointcloud_stream(twin_uuid, on_pointcloud)
+
+    def publish_depth_frame(
+        self,
+        twin_uuid: str,
+        depth_data: Dict[str, Any],
+        timestamp: Optional[float] = None,
+    ):
+        """Publish depth frame data via MQTT."""
+        return self._client.publish_depth_frame(twin_uuid, depth_data, timestamp)
+
+    def publish_webrtc_message(self, twin_uuid: str, webrtc_data: Dict[str, Any]):
+        """Publish WebRTC signaling message via MQTT."""
+        return self._client.publish_webrtc_message(twin_uuid, webrtc_data)
+
+    def subscribe_webrtc_messages(
+        self, twin_uuid: str, on_message: Optional[Callable] = None
+    ):
+        """Subscribe to WebRTC signaling messages via MQTT."""
+        return self._client.subscribe_webrtc_messages(twin_uuid, on_message)
+
+    def publish_command_message(self, twin_uuid: str, status):
+        """Publish Edge command response message via MQTT.
+
+        Args:
+            twin_uuid: The twin UUID to publish to
+            status: Either a string status (e.g., "ok") or a dict with status and other fields
+        """
+        return self._client.publish_command_message(twin_uuid, status)
+
+    def subscribe_command_message(
+        self, twin_uuid: str, on_command: Optional[Callable] = None
+    ):
+        """Subscribe to Edge command message via MQTT."""
+        return self._client.subscribe_command_message(twin_uuid, on_command)
+
+    def ping(self, resource_uuid: str):
+        """Send ping message to test connectivity."""
+        return self._client.ping(resource_uuid)
+
+    def subscribe_pong(self, resource_uuid: str, on_pong: Optional[Callable] = None):
+        """Subscribe to pong responses."""
+        return self._client.subscribe_pong(resource_uuid, on_pong)
+
+    # Low-level MQTT methods for advanced use cases
+    def subscribe(
+        self,
+        topic: str,
+        handler: Optional[Callable] = None,
+        qos: int = 0,
+        *,
+        no_local: bool = False,
+        subscriber_key: Any = None,
+    ):
+        """
+        Subscribe to any MQTT topic.
+
+        Args:
+            topic: MQTT topic pattern
+            handler: Callback function for messages
+            qos: Quality of service level (0, 1, or 2)
+            no_local: MQTT v5 only — broker will not echo this client's publishes
+            subscriber_key: Opaque per-subscriber key. Distinct keys let
+                independent subscribers coexist on one topic; re-subscribing
+                under the same key replaces in place (see BaseMQTTClient).
+        """
+        return self._client.subscribe(
+            topic, handler, qos, no_local=no_local, subscriber_key=subscriber_key
+        )
+
+    @property
+    def is_mqtt_v5(self) -> bool:
+        """True when the underlying client negotiates MQTT v5."""
+        return self._client.is_mqtt_v5
+
+    def unsubscribe(self, topic: str, subscriber_key: Any = _UNSET) -> None:
+        """
+        Unsubscribe from an MQTT topic.
+
+        Args:
+            topic: MQTT topic to unsubscribe from
+            subscriber_key: When given, removes only that subscriber's handler
+                and keeps the broker subscription alive while others remain.
+                Omitted (default) removes all handlers and tears down the
+                broker subscription.
+        """
+        return self._client.unsubscribe(topic, subscriber_key)
+
+    def publish(self, topic: str, message: Dict[str, Any], qos: int = 0):
+        """
+        Publish a message to any MQTT topic.
+
+        Args:
+            topic: MQTT topic
+            message: Message payload as dictionary
+            qos: Quality of service level (0, 1, or 2)
+        """
+        return self._client.publish(topic, message, qos)
